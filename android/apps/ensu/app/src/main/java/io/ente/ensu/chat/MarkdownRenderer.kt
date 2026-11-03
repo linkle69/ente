@@ -81,7 +81,7 @@ fun MarkdownView(
                                 BlockQuoteView(text = block.text, appendCursor = appendCursor)
                             }
                             is MarkdownBlock.Code -> {
-                                CodeBlockView(code = block.text)
+                                CodeBlockView(code = block.text, language = block.language)
                                 if (appendCursor) {
                                     TrailingCursor()
                                 }
@@ -161,8 +161,13 @@ private fun BlockQuoteView(text: String, appendCursor: Boolean = false) {
 }
 
 @Composable
-private fun CodeBlockView(code: String) {
+private fun CodeBlockView(code: String, language: String?) {
     val clipboard = LocalClipboardManager.current
+    val palette = SyntaxPalette.current()
+    val highlighted =
+        remember(code, language, palette) {
+            SyntaxHighlighter.highlight(code, language, palette)
+        }
     Box(
         modifier =
             Modifier.fillMaxWidth()
@@ -172,21 +177,38 @@ private fun CodeBlockView(code: String) {
                 )
                 .border(1.dp, EnsuColor.border(), RoundedCornerShape(EnsuCornerRadius.codeBlock.dp))
     ) {
-        Row(
-            modifier =
-                Modifier.horizontalScroll(rememberScrollState())
-                    .padding(
-                        start = EnsuSpacing.cardPadding.dp,
-                        end = (EnsuSpacing.cardPadding + 32).dp,
-                        top = EnsuSpacing.cardPadding.dp,
-                        bottom = (EnsuSpacing.cardPadding + 32).dp,
-                    )
-        ) {
-            Text(
-                text = code,
-                style = EnsuTypography.code,
-                color = EnsuColor.textPrimary(),
-            )
+        Column {
+            if (!language.isNullOrBlank()) {
+                Text(
+                    text = language,
+                    style = EnsuTypography.small,
+                    color = EnsuColor.textMuted(),
+                    modifier =
+                        Modifier.padding(
+                            start = EnsuSpacing.cardPadding.dp,
+                            end = EnsuSpacing.cardPadding.dp,
+                            top = EnsuSpacing.sm.dp,
+                        ),
+                )
+            }
+            Row(
+                modifier =
+                    Modifier.horizontalScroll(rememberScrollState())
+                        .padding(
+                            start = EnsuSpacing.cardPadding.dp,
+                            end = (EnsuSpacing.cardPadding + 32).dp,
+                            top =
+                                if (language.isNullOrBlank()) EnsuSpacing.cardPadding.dp
+                                else EnsuSpacing.xs.dp,
+                            bottom = (EnsuSpacing.cardPadding + 32).dp,
+                        )
+            ) {
+                Text(
+                    text = highlighted,
+                    style = EnsuTypography.code,
+                    color = EnsuColor.textPrimary(),
+                )
+            }
         }
 
         IconButton(
@@ -701,7 +723,7 @@ private sealed interface MarkdownBlock {
 
     data class BlockQuote(val text: String) : MarkdownBlock
 
-    data class Code(val text: String) : MarkdownBlock
+    data class Code(val text: String, val language: String? = null) : MarkdownBlock
 
     data class Math(val text: String) : MarkdownBlock
 
@@ -711,14 +733,38 @@ private sealed interface MarkdownBlock {
 }
 
 private object MarkdownParser {
+    private val fenceLanguage = Regex("^[A-Za-z0-9_+#.-]{1,32}$")
+
     fun parse(text: String): List<MarkdownBlock> {
         val blocks = mutableListOf<MarkdownBlock>()
         val segments = text.split("```")
         segments.forEachIndexed { index, segment ->
             if (index % 2 == 1) {
-                val code = segment.trim()
-                if (code.isNotEmpty()) {
-                    blocks.add(MarkdownBlock.Code(code))
+                // The fence's info string (e.g. ```kotlin) sits on the first line.
+                val newline = segment.indexOf('\n')
+                val infoLine = (if (newline >= 0) segment.substring(0, newline) else segment).trim()
+                val hasInfo = infoLine.isNotEmpty() && fenceLanguage.matches(infoLine)
+                val language: String?
+                val body: String
+                when {
+                    hasInfo && newline >= 0 -> {
+                        language = infoLine
+                        body = segment.substring(newline + 1)
+                    }
+                    // Still streaming the opening fence line: wait for the newline.
+                    hasInfo && index == segments.lastIndex -> {
+                        language = infoLine
+                        body = ""
+                    }
+                    else -> {
+                        language = null
+                        body = segment
+                    }
+                }
+                // Keep leading indentation; only drop surrounding blank lines.
+                val code = body.lines().dropWhile { it.isBlank() }.joinToString("\n").trimEnd()
+                if (code.isNotBlank()) {
+                    blocks.add(MarkdownBlock.Code(code, language))
                 }
             } else {
                 blocks.addAll(parseTextBlocks(segment))
